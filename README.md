@@ -1,3 +1,9 @@
+---
+license: mit
+sdk: docker
+app_port: 7860
+---
+
 <p align="center">
     <a href="https://linux.do" alt="LINUX DO">
         <img
