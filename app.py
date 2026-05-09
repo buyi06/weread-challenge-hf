@@ -1384,7 +1384,7 @@ _INDEX_HTML = r"""<!doctype html>
   </main>
 
   <footer>
-    weread-challenge-hf · auto-refresh 30s · <span id="now">—</span>
+    weread-challenge-hf · <span id="refresh-interval">auto-refresh 30s</span> · <span id="now">—</span>
     · <a href="/status" target="_blank">/status</a>
     · <a href="/healthz" target="_blank">/healthz</a>
     · <a href="/logout">退出登录</a>
@@ -1529,11 +1529,15 @@ _INDEX_HTML = r"""<!doctype html>
   function applyButtonState(phaseKey) {
     const startBtn = $("start-btn");
     const pauseBtn = $("pause-btn");
+    const restartBtn = $("restart-btn");
     if (startBtn && !startBtn.classList.contains("loading")) {
       startBtn.disabled = (phaseKey === "running" || phaseKey === "waiting_login");
     }
     if (pauseBtn && !pauseBtn.classList.contains("loading")) {
       pauseBtn.disabled = !(phaseKey === "running" || phaseKey === "waiting_login");
+    }
+    if (restartBtn && !restartBtn.classList.contains("loading")) {
+      restartBtn.disabled = false;
     }
   }
 
@@ -1635,6 +1639,10 @@ _INDEX_HTML = r"""<!doctype html>
     $("notif-summary").textContent = okN > 0 ? okN + " 个已启用" : "未配置";
 
     applyButtonState(phaseKey);
+
+    /* Refresh interval indicator */
+    const ri = $("refresh-interval");
+    if (ri) ri.textContent = currentPhase === "waiting_login" ? "auto-refresh 5s" : "auto-refresh 30s";
   }
 
   /* ---------- Logs ---------- */
@@ -1753,12 +1761,12 @@ _INDEX_HTML = r"""<!doctype html>
       labelEl.textContent = normalLabel;
       btn.classList.remove("loading");
       // immediate refresh to reflect new phase
-      refresh(); loadLogs();
-      // re-enable based on phase after the action settles
+      refresh(); loadLogs(); resetAutoRefresh();
+      // delayed refresh to pick up late state changes (e.g. QR generation)
       setTimeout(() => {
         btn.disabled = false;
         applyButtonState(currentPhase);
-        refresh(); loadLogs();
+        refresh(); loadLogs(); resetAutoRefresh();
       }, refreshDelay || 1500);
     });
   }
@@ -1797,17 +1805,32 @@ _INDEX_HTML = r"""<!doctype html>
     if (!ok) return;
     runAction($("restart-btn"), "🔄 重启中…", "🔄 重启", async () => {
       const r = await postJSON("/restart");
-      if (r.ok && r.body.ok) toast("已重启 · 新 PID " + (r.body.spawned_pid || "?") + "，等待二维码生成…", "success");
+      if (r.ok && r.body.ok) {
+        toast("已重启 · 新 PID " + (r.body.spawned_pid || "?") + "，等待二维码生成…", "success");
+        /* Extra refresh 5s later to pick up the newly generated QR code */
+        setTimeout(() => { refresh(); loadLogs(); }, 5000);
+      }
       else toast("重启失败：" + (r.body.reason || ("HTTP " + r.status)), "error");
-    }, 8000);
+    }, 3000);
   });
 
   $("notif-save").addEventListener("click", saveNotif);
 
   /* ---------- Init ---------- */
   refresh(); loadLogs(); loadNotif();
-  setInterval(refresh,  30000);
-  setInterval(loadLogs, 30000);
+  let _refreshTimer = null;
+  function _autoRefresh() {
+    const interval = currentPhase === "waiting_login" ? 5000 : 30000;
+    _refreshTimer = setTimeout(() => {
+      refresh(); loadLogs();
+      _autoRefresh();
+    }, interval);
+  }
+  function resetAutoRefresh() {
+    if (_refreshTimer) clearTimeout(_refreshTimer);
+    _autoRefresh();
+  }
+  resetAutoRefresh();
 })();
 </script>
 {% endraw %}
