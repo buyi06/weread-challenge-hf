@@ -477,6 +477,20 @@ _LOGIN_HTML = r"""<!doctype html>
     --err: #ff5b5b;
     --err-glow: rgba(255, 91, 91, 0.18);
   }
+  :root[data-theme="light"] {
+    --bg-0: #f5f5f7;
+    --panel: rgba(255, 255, 255, 0.78);
+    --border: rgba(0, 0, 0, 0.08);
+    --border-strong: rgba(0, 0, 0, 0.14);
+    --text: #1d1d1f;
+    --muted: #6e6e73;
+    --muted-2: #999;
+    --accent: #07C160;
+    --accent-2: #04a04f;
+    --accent-glow: rgba(7, 193, 96, 0.22);
+    --err: #e53935;
+    --err-glow: rgba(229, 57, 53, 0.12);
+  }
   * { box-sizing: border-box; -webkit-font-smoothing: antialiased; }
   html, body { height: 100%; }
   body {
@@ -590,6 +604,7 @@ _LOGIN_HTML = r"""<!doctype html>
 </style>
 </head>
 <body>
+  <button id="theme-toggle" type="button" onclick="toggleTheme()" style="position:fixed;top:18px;right:18px;z-index:99;background:var(--panel);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);border:1px solid var(--border);border-radius:10px;padding:8px 10px;cursor:pointer;font-size:18px;line-height:1;color:var(--text);transition:background 0.2s,border-color 0.2s" title="切换主题"></button>
   <div class="card">
     <div class="logo">📖</div>
     <h1>WeRead Challenge</h1>
@@ -601,6 +616,18 @@ _LOGIN_HTML = r"""<!doctype html>
     </form>
     <div class="hint">通过环境变量 <code>WEB_PASSWORD</code> 修改</div>
   </div>
+  <script>
+  function toggleTheme(){
+    var r=document.documentElement,t=r.getAttribute("data-theme");
+    if(t==="light"){r.removeAttribute("data-theme");localStorage.setItem("wr-theme","dark");document.getElementById("theme-toggle").textContent="🌙"}
+    else{r.setAttribute("data-theme","light");localStorage.setItem("wr-theme","light");document.getElementById("theme-toggle").textContent="☀️"}
+  }
+  (function(){
+    var s=localStorage.getItem("wr-theme");
+    var b=document.getElementById("theme-toggle");
+    if(s==="light"){document.documentElement.setAttribute("data-theme","light");b.textContent="☀️"}else{b.textContent="🌙"}
+  })();
+  </script>
 </body>
 </html>
 """
@@ -635,6 +662,28 @@ _INDEX_HTML = r"""<!doctype html>
     --info-glow: rgba(79, 140, 255, 0.28);
     --danger-1: #ff7a45;
     --danger-2: #d8453d;
+  }
+  :root[data-theme="light"] {
+    --bg-0: #f5f5f7;
+    --bg-1: #eeeef0;
+    --panel: rgba(255, 255, 255, 0.78);
+    --panel-solid: #ffffff;
+    --border: rgba(0, 0, 0, 0.08);
+    --border-strong: rgba(0, 0, 0, 0.14);
+    --text: #1d1d1f;
+    --muted: #6e6e73;
+    --muted-2: #999;
+    --accent: #07C160;
+    --accent-2: #04a04f;
+    --accent-glow: rgba(7, 193, 96, 0.18);
+    --warn: #e6a000;
+    --warn-glow: rgba(230, 160, 0, 0.15);
+    --err: #e53935;
+    --err-glow: rgba(229, 57, 53, 0.15);
+    --info: #2563eb;
+    --info-glow: rgba(37, 99, 235, 0.15);
+    --danger-1: #e55a00;
+    --danger-2: #c62828;
   }
   * { box-sizing: border-box; -webkit-font-smoothing: antialiased; }
   html, body { height: 100%; }
@@ -1055,6 +1104,40 @@ _INDEX_HTML = r"""<!doctype html>
     .toast-stack { left: 14px; right: 14px; top: 14px; }
     .toast { max-width: none; min-width: 0; }
   }
+  /* Light theme overrides */
+  :root[data-theme="light"] header {
+    background: rgba(245, 245, 247, 0.82);
+  }
+  :root[data-theme="light"] .card {
+    background: rgba(255,255,255,0.85);
+    box-shadow: 0 4px 24px -8px rgba(0,0,0,0.08), 0 0 0 1px rgba(0,0,0,0.04);
+  }
+  :root[data-theme="light"] .log-entry { color: #444; }
+  :root[data-theme="light"] .log-entry.error { color: #c62828; }
+  :root[data-theme="light"] .log-entry.warning { color: #bf6900; }
+  :root[data-theme="light"] .toast {
+    background: rgba(255,255,255,0.94);
+    box-shadow: 0 8px 24px -8px rgba(0,0,0,0.12);
+  }
+  :root[data-theme="light"] .modal { background: #fff; }
+  :root[data-theme="light"] .modal-mask { background: rgba(0,0,0,0.3); }
+  :root[data-theme="light"] .notif-field input {
+    background: rgba(0,0,0,0.04);
+  }
+  :root[data-theme="light"] .notif-field input:focus {
+    background: rgba(0,0,0,0.06);
+  }
+  :root[data-theme="light"] .env-row { border-bottom-color: rgba(0,0,0,0.06); }
+  :root[data-theme="light"] .log-list::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.15); }
+  :root[data-theme="light"] .qr-card { background: #fff; }
+  /* theme toggle */
+  .theme-toggle {
+    background: var(--panel); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+    border: 1px solid var(--border); border-radius: 10px;
+    padding: 6px 10px; cursor: pointer; font-size: 16px; line-height: 1;
+    color: var(--text); transition: background 0.2s, border-color 0.2s, transform 0.12s;
+  }
+  .theme-toggle:hover { transform: translateY(-1px); }
 </style>
 </head>
 <body>
@@ -1065,6 +1148,7 @@ _INDEX_HTML = r"""<!doctype html>
         <span>WeRead Challenge</span>
       </div>
       <div class="header-actions">
+        <button class="theme-toggle" id="theme-toggle" type="button" title="切换主题"></button>
         <span id="header-phase" class="phase idle"><span class="dot"></span><span class="label">空闲</span></span>
         <a class="icon-btn" href="/logout">退出</a>
       </div>
