@@ -2,7 +2,7 @@
 """Flask Web UI for weread-selenium-cli on HuggingFace Spaces.
 
 Features:
-  - Password-protected Web UI (default: 114114aa)
+  - Password-protected Web UI (default: linuxdo123)
   - Dark-themed status dashboard with auto-refresh
   - QR code display + manual restart button
   - Manual trigger reading / restart reading
@@ -43,7 +43,7 @@ READING_INTERVAL_HOURS = float(os.environ.get("READING_INTERVAL_HOURS", "12"))
 START_SCRIPT = Path(os.environ.get("START_SCRIPT", "/app/start_reading.sh"))
 COOKIE_TTL_DAYS = 30
 LOGIN_QR_FRESH_MINUTES = 5
-WEB_PASSWORD = os.environ.get("WEB_PASSWORD", "114114aa")
+WEB_PASSWORD = os.environ.get("WEB_PASSWORD", "linuxdo123")
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
