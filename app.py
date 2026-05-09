@@ -322,29 +322,24 @@ def route_stop() -> Response:
 
 
 def _kill_reader(pid: int | None) -> None:
-    """SIGTERM (then SIGKILL) the reader's whole process group."""
+    """Terminate the reading process gently (SIGTERM → SIGKILL)."""
     if pid is None:
         return
     try:
-        try:
-            pgid = os.getpgid(pid)
-        except (ProcessLookupError, PermissionError):
-            pgid = pid
-        os.killpg(pgid, signal.SIGTERM)
+        os.kill(pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        return
+    # Wait in background thread so we don't block the Flask request
+    def _wait_and_force():
         for _ in range(20):
             time.sleep(0.1)
             if _pid_alive() != pid:
                 return
-        os.killpg(pgid, signal.SIGKILL)
-    except (ProcessLookupError, PermissionError, AttributeError, OSError):
-        # AttributeError covers Windows (no killpg); fall back to plain kill.
         try:
-            os.kill(pid, signal.SIGTERM)
-            time.sleep(1)
-            if _pid_alive() == pid:
-                os.kill(pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError, OSError):
+            os.kill(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
             pass
+    threading.Thread(target=_wait_and_force, daemon=True).start()
 
 
 @app.route("/logs")
@@ -508,20 +503,6 @@ def route_notif_save() -> Response:
 
 
 
-
-@app.route("/pause", methods=["POST"])
-def route_pause() -> Response:
-    """Pause or resume the reading process (SIGSTOP/SIGCONT)."""
-    pid = _pid_alive()
-    if pid is None:
-        return jsonify({"ok": False, "reason": "not running"}), 409
-    paused = _is_paused(pid)
-    if paused:
-        os.kill(pid, signal.SIGCONT)
-        return jsonify({"ok": True, "action": "resumed", "pid": pid})
-    else:
-        os.kill(pid, signal.SIGSTOP)
-        return jsonify({"ok": True, "action": "paused", "pid": pid})
 
 @app.route("/healthz")
 def route_health() -> Response:
@@ -1274,7 +1255,7 @@ _INDEX_HTML = r"""<!doctype html>
           <span class="spinner"></span><span class="label">▶ 开始</span>
         </button>
         <button id="pause-btn" class="btn warn">
-          <span class="spinner"></span><span class="label">⏸ 暂停</span>
+          <span class="spinner"></span><span class="label">⏹ 停止</span>
         </button>
         <button id="restart-btn" class="btn ghost">
           <span class="spinner"></span><span class="label">🔄 重启</span>
@@ -1779,15 +1760,15 @@ _INDEX_HTML = r"""<!doctype html>
   });
 
   $("pause-btn").addEventListener("click", async () => {
-    const ok = await confirmModal("暂停阅读", "将终止当前阅读进程。cookies 不会丢失，可随时点击「开始」继续。", "暂停", false);
+    const ok = await confirmModal("停止本次阅读", "将终止当前阅读进程，cookies 不会丢失。下次调度时间会自动继续。", "停止", false);
     if (!ok) return;
-    runAction($("pause-btn"), "⏸ 停止中…", "⏸ 暂停", async () => {
+    runAction($("pause-btn"), "⏹ 停止中…", "⏹ 停止", async () => {
       const r = await postJSON("/stop");
       if (r.ok && r.body.ok) {
-        toast("已暂停 · 终止 PID " + r.body.killed_pid, "warn");
+        toast("已停止 · 终止 PID " + r.body.killed_pid, "warn");
       } else {
         const reason = r.body.reason === "not running" ? "当前没有运行的进程" : (r.body.reason || ("HTTP " + r.status));
-        toast("暂停失败：" + reason, "error");
+        toast("停止失败：" + reason, "error");
       }
     }, 2000);
   });
