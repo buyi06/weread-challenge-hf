@@ -52,6 +52,7 @@ COOKIES_JSON = DATA_DIR / "cookies.json"
 PID_FILE = DATA_DIR / "run.pid"
 STATE_FILE = DATA_DIR / "last_run.json"
 APP_LOG = DATA_DIR / "app.log"
+NOTIF_CONFIG = DATA_DIR / "notification_config.json"
 
 PUBLIC_ENV_KEYS = (
     "WEREAD_BROWSER", "WEREAD_DATA_DIR", "WEREAD_DURATION", "WEREAD_SPEED",
@@ -347,6 +348,103 @@ def route_logs_clean() -> Response:
     entries = entries[-n:]
     return jsonify({"entries": entries, "total": total})
 
+
+# ─── Notification config ──────────────────────────────────────────────────────
+NOTIF_SCHEMA = {
+    "bark": {"bark_key": "", "bark_url": "https://api.day.app"},
+    "email": {
+        "email_user": "", "email_pass": "", "email_to": "",
+        "email_from": "", "email_smtp": "", "email_port": "465",
+    },
+    "webhook": {"webhook_url": ""},
+}
+
+_NOTIF_SECRET_FIELDS = {"bark_key", "email_pass"}
+_NOTIF_ENV_MAP = {
+    "bark_key": "BARK_KEY",
+    "email_user": "EMAIL_USER", "email_pass": "EMAIL_PASS",
+    "email_to": "EMAIL_TO",     "email_from": "EMAIL_FROM",
+    "email_smtp": "EMAIL_SMTP", "email_port": "EMAIL_PORT",
+    "webhook_url": "WEBHOOK_URL",
+}
+
+
+def _load_notif_config() -> dict:
+    """Read saved notification config from disk; env vars override saved values."""
+    cfg = {ch: dict(fields) for ch, fields in NOTIF_SCHEMA.items()}
+
+    if NOTIF_CONFIG.exists():
+        try:
+            saved = json.loads(NOTIF_CONFIG.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            saved = {}
+        for ch, fields in cfg.items():
+            saved_ch = saved.get(ch) or {}
+            for field in fields:
+                val = saved_ch.get(field, "")
+                if isinstance(val, str) and val and val != "***set***":
+                    cfg[ch][field] = val
+
+    for ch, fields in cfg.items():
+        for field in fields:
+            env_key = _NOTIF_ENV_MAP.get(field)
+            if env_key:
+                env_val = os.environ.get(env_key, "")
+                if env_val:
+                    cfg[ch][field] = env_val
+    return cfg
+
+
+@app.route("/api/notification", methods=["GET"])
+def route_notif_get() -> Response:
+    """Return current notification config with secret fields masked."""
+    cfg = _load_notif_config()
+    masked: dict = {}
+    for ch, fields in cfg.items():
+        masked[ch] = {}
+        for k, v in fields.items():
+            if k in _NOTIF_SECRET_FIELDS:
+                masked[ch][k] = "***set***" if v else ""
+            else:
+                masked[ch][k] = v
+    return jsonify({"ok": True, "config": masked, "schema": NOTIF_SCHEMA})
+
+
+@app.route("/api/notification", methods=["POST"])
+def route_notif_save() -> Response:
+    """Persist notification config; ``***set***`` keeps the existing secret value."""
+    incoming = request.get_json(silent=True) or {}
+    existing: dict = {}
+    if NOTIF_CONFIG.exists():
+        try:
+            existing = json.loads(NOTIF_CONFIG.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            existing = {}
+
+    cleaned: dict = {}
+    for ch, fields in NOTIF_SCHEMA.items():
+        cleaned[ch] = {}
+        sub_in = incoming.get(ch) or {}
+        sub_old = (existing.get(ch) or {}) if isinstance(existing.get(ch), dict) else {}
+        for field in fields:
+            val = sub_in.get(field, "")
+            if not isinstance(val, str):
+                val = str(val)
+            val = val.strip()
+            if val == "***set***" and field in _NOTIF_SECRET_FIELDS:
+                val = sub_old.get(field, "") if isinstance(sub_old.get(field, ""), str) else ""
+            cleaned[ch][field] = val
+
+    try:
+        NOTIF_CONFIG.parent.mkdir(parents=True, exist_ok=True)
+        with NOTIF_CONFIG.open("w", encoding="utf-8") as f:
+            json.dump(cleaned, f, indent=2, ensure_ascii=False)
+    except OSError as exc:
+        return jsonify({"ok": False, "reason": str(exc)}), 500
+
+    return jsonify({"ok": True})
+
+
 @app.route("/healthz")
 def route_health() -> Response:
     return jsonify({"ok": True, "now": _utcnow().isoformat()})
@@ -362,29 +460,147 @@ _LOGIN_HTML = r"""<!doctype html>
 <html lang="zh">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>WeRead Challenge - Login</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>WeRead Challenge · 登录</title>
 <style>
-  :root { --bg: #0d1117; --panel: #161b22; --border: #30363d; --text: #e6edf3; --muted: #8b949e; --accent: #58a6ff; --err: #f85149; }
-  * { box-sizing: border-box; }
-  body { margin: 0; font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; background: var(--bg); color: var(--text); display: flex; justify-content: center; align-items: center; min-height: 100vh; }
-  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 32px; width: 320px; text-align: center; }
-  h1 { font-size: 20px; margin: 0 0 24px; }
-  input { width: 100%; padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); font-size: 14px; margin-bottom: 16px; outline: none; }
-  input:focus { border-color: var(--accent); }
-  button { width: 100%; padding: 10px; background: var(--accent); color: #fff; border: none; border-radius: 6px; font-size: 14px; cursor: pointer; }
-  .err { color: var(--err); font-size: 13px; margin-bottom: 12px; }
+  :root {
+    --bg-0: #0a0a0b;
+    --panel: rgba(22, 22, 28, 0.66);
+    --border: rgba(255, 255, 255, 0.06);
+    --border-strong: rgba(255, 255, 255, 0.12);
+    --text: #f4f4f7;
+    --muted: #8a8a96;
+    --muted-2: #5b5b66;
+    --accent: #07C160;
+    --accent-2: #04a04f;
+    --accent-glow: rgba(7, 193, 96, 0.32);
+    --err: #ff5b5b;
+    --err-glow: rgba(255, 91, 91, 0.18);
+  }
+  * { box-sizing: border-box; -webkit-font-smoothing: antialiased; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI",
+                 "PingFang SC", "Microsoft YaHei", sans-serif;
+    color: var(--text);
+    background:
+      radial-gradient(1200px 600px at 50% -10%, rgba(7,193,96,0.12), transparent 60%),
+      radial-gradient(800px 500px at 90% 110%, rgba(79, 140, 255, 0.08), transparent 60%),
+      var(--bg-0);
+    background-attachment: fixed;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    padding: 24px;
+  }
+  .card {
+    width: min(380px, 100%);
+    background: var(--panel);
+    backdrop-filter: blur(24px) saturate(160%);
+    -webkit-backdrop-filter: blur(24px) saturate(160%);
+    border: 1px solid var(--border);
+    border-radius: 18px;
+    padding: 36px 32px 28px;
+    box-shadow:
+      0 24px 60px -20px rgba(0,0,0,0.6),
+      0 0 0 1px rgba(255,255,255,0.02) inset;
+    animation: fadeUp 0.5s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  @keyframes fadeUp {
+    from { opacity: 0; transform: translateY(8px) scale(0.98); }
+    to   { opacity: 1; transform: translateY(0)   scale(1);    }
+  }
+  .logo {
+    width: 52px; height: 52px;
+    border-radius: 14px;
+    background: linear-gradient(135deg, var(--accent) 0%, var(--accent-2) 100%);
+    box-shadow: 0 10px 28px -6px var(--accent-glow);
+    display: flex; align-items: center; justify-content: center;
+    margin: 0 auto 20px;
+    font-size: 28px;
+  }
+  h1 {
+    margin: 0 0 6px; text-align: center;
+    font-size: 20px; font-weight: 600; letter-spacing: -0.01em;
+  }
+  .sub {
+    text-align: center; color: var(--muted);
+    font-size: 13px; margin-bottom: 26px;
+  }
+  form { display: flex; flex-direction: column; gap: 14px; }
+  input[type="password"] {
+    width: 100%; padding: 12px 14px;
+    background: rgba(0,0,0,0.32);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    color: var(--text);
+    font-size: 14px; font-family: inherit;
+    outline: none;
+    transition: border-color 0.2s, box-shadow 0.2s, background 0.2s;
+    min-height: 44px;
+  }
+  input[type="password"]::placeholder { color: var(--muted-2); }
+  input[type="password"]:focus {
+    border-color: var(--accent);
+    background: rgba(0,0,0,0.5);
+    box-shadow: 0 0 0 3px var(--accent-glow);
+  }
+  button {
+    width: 100%; padding: 12px;
+    border: none; border-radius: 10px;
+    font-size: 14px; font-weight: 500; font-family: inherit;
+    color: #fff;
+    background: linear-gradient(180deg, var(--accent) 0%, var(--accent-2) 100%);
+    cursor: pointer;
+    transition: transform 0.12s ease, box-shadow 0.2s ease, filter 0.15s;
+    box-shadow: 0 6px 18px -6px var(--accent-glow);
+    min-height: 44px;
+  }
+  button:hover  { transform: translateY(-1px); box-shadow: 0 12px 24px -8px var(--accent-glow); filter: brightness(1.06); }
+  button:active { transform: translateY(0);    filter: brightness(0.94); }
+  .err {
+    color: var(--err);
+    font-size: 13px;
+    background: var(--err-glow);
+    border: 1px solid rgba(255,91,91,0.24);
+    padding: 9px 12px;
+    border-radius: 8px;
+    text-align: center;
+    animation: shake 0.45s cubic-bezier(0.36, 0.07, 0.19, 0.97);
+  }
+  @keyframes shake {
+    10%, 90% { transform: translateX(-1px); }
+    20%, 80% { transform: translateX(2px);  }
+    30%, 50%, 70% { transform: translateX(-4px); }
+    40%, 60% { transform: translateX(4px);  }
+  }
+  .hint {
+    color: var(--muted-2); font-size: 11px;
+    text-align: center; margin-top: 18px;
+  }
+  .hint code {
+    background: rgba(255,255,255,0.06);
+    padding: 1px 6px; border-radius: 4px;
+    font-family: ui-monospace, "SF Mono", monospace;
+    font-size: 11px;
+    color: var(--muted);
+  }
 </style>
 </head>
 <body>
-<div class="card">
-  <h1>📖 WeRead Challenge</h1>
-  {% if error %}<div class="err">密码错误，请重试</div>{% endif %}
-  <form method="POST">
-    <input type="password" name="password" placeholder="输入密码" autofocus>
-    <button type="submit">登录</button>
-  </form>
-</div>
+  <div class="card">
+    <div class="logo">📖</div>
+    <h1>WeRead Challenge</h1>
+    <div class="sub">输入访问密码以继续</div>
+    {% if error %}<div class="err">密码错误，请重试</div>{% endif %}
+    <form method="POST" autocomplete="off">
+      <input type="password" name="password" placeholder="访问密码" autofocus required>
+      <button type="submit">登 录</button>
+    </form>
+    <div class="hint">通过环境变量 <code>WEB_PASSWORD</code> 修改</div>
+  </div>
 </body>
 </html>
 """
@@ -395,214 +611,957 @@ _INDEX_HTML = r"""<!doctype html>
 <html lang="zh">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>WeRead Challenge</title>
 <style>
   :root {
-    --bg: #0d1117; --panel: #161b22; --border: #30363d;
-    --text: #e6edf3; --muted: #8b949e; --accent: #58a6ff;
-    --ok: #3fb950; --warn: #d29922; --err: #f85149;
+    --bg-0: #0a0a0b;
+    --bg-1: #111114;
+    --panel: rgba(22, 22, 28, 0.66);
+    --panel-solid: #16161c;
+    --border: rgba(255, 255, 255, 0.06);
+    --border-strong: rgba(255, 255, 255, 0.12);
+    --text: #f4f4f7;
+    --muted: #8a8a96;
+    --muted-2: #5b5b66;
+    --accent: #07C160;
+    --accent-2: #04a04f;
+    --accent-glow: rgba(7, 193, 96, 0.32);
+    --warn: #f5a524;
+    --warn-glow: rgba(245, 165, 36, 0.28);
+    --err: #ff5b5b;
+    --err-glow: rgba(255, 91, 91, 0.28);
+    --info: #4f8cff;
+    --info-glow: rgba(79, 140, 255, 0.28);
+    --danger-1: #ff7a45;
+    --danger-2: #d8453d;
   }
-  * { box-sizing: border-box; }
-  body { margin: 0; font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
-         background: var(--bg); color: var(--text); padding: 16px; }
-  h1 { margin: 0 0 12px; font-size: 18px; font-weight: 600; }
-  h1 small { color: var(--muted); font-weight: 400; font-size: 12px; margin-left: 8px; }
-  .grid { display: grid; gap: 12px; max-width: 720px; margin: 0 auto;
-          grid-template-columns: 1fr; }
-  @media (min-width: 720px) { .grid { grid-template-columns: 1fr 1fr; } }
-  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
-          padding: 14px 16px; }
-  .card h2 { margin: 0 0 10px; font-size: 13px; color: var(--muted);
-             font-weight: 500; text-transform: uppercase; letter-spacing: 0.4px; }
-  .row { display: flex; justify-content: space-between; padding: 4px 0;
-         border-bottom: 1px dashed #21262d; font-size: 14px; }
-  .row:last-child { border-bottom: none; }
-  .row .k { color: var(--muted); }
-  .row .v { font-family: ui-monospace, "SF Mono", monospace; font-size: 13px; }
-  .pill { display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 12px;
-          font-weight: 500; }
-  .pill.running { background: rgba(63,185,80,0.16); color: var(--ok); }
-  .pill.waiting_login { background: rgba(210,153,34,0.18); color: var(--warn); }
-  .pill.idle { background: rgba(139,148,158,0.2); color: var(--muted); }
-  .pill.failed { background: rgba(248,81,73,0.2); color: var(--err); }
-  img.qr { display: block; max-width: 280px; width: 100%; border-radius: 6px;
-           background: #fff; padding: 8px; margin-top: 8px; }
-  .qr-empty { color: var(--muted); font-size: 13px; padding: 14px 0; }
-  button { background: var(--accent); color: #fff; border: none; border-radius: 6px;
-           padding: 7px 14px; font-size: 13px; cursor: pointer; margin-right: 6px; margin-top: 6px; }
-  button:disabled { background: #30363d; color: var(--muted); cursor: not-allowed; }
-  button.danger { background: var(--warn); }
-  pre.log { background: #010409; border: 1px solid var(--border); border-radius: 6px;
-            color: #c9d1d9; font-size: 12px; padding: 10px; max-height: 240px;
-            overflow: auto; margin: 0; white-space: pre-wrap; word-break: break-all; }
-  .footer { color: var(--muted); font-size: 11px; text-align: center;
-            padding-top: 16px; }
-  a { color: var(--accent); text-decoration: none; }
-  .countdown { font-size: 22px; font-family: ui-monospace, monospace; color: var(--accent); }
+  * { box-sizing: border-box; -webkit-font-smoothing: antialiased; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI",
+                 "PingFang SC", "Microsoft YaHei", sans-serif;
+    color: var(--text);
+    background:
+      radial-gradient(1200px 600px at 50% -200px, rgba(7,193,96,0.06), transparent 70%),
+      radial-gradient(800px 500px at 100% 100%, rgba(79,140,255,0.05), transparent 60%),
+      var(--bg-0);
+    background-attachment: fixed;
+    min-height: 100vh;
+    line-height: 1.5;
+  }
+  a { color: var(--info); text-decoration: none; }
+  a:hover { color: var(--text); }
+
+  /* Header */
+  header {
+    position: sticky; top: 0; z-index: 50;
+    backdrop-filter: blur(20px) saturate(180%);
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+    background: rgba(10, 10, 11, 0.72);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 20px;
+  }
+  .header-inner {
+    max-width: 880px; margin: 0 auto;
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 12px;
+  }
+  .brand {
+    display: flex; align-items: center; gap: 10px;
+    font-weight: 600; font-size: 15px; letter-spacing: -0.01em;
+  }
+  .brand-icon {
+    width: 30px; height: 30px;
+    border-radius: 9px;
+    background: linear-gradient(135deg, var(--accent) 0%, var(--accent-2) 100%);
+    box-shadow: 0 6px 16px -4px var(--accent-glow);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 17px;
+  }
+  .header-actions { display: flex; align-items: center; gap: 10px; }
+  .icon-btn {
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 6px 12px;
+    color: var(--muted);
+    font-size: 12px; font-family: inherit;
+    cursor: pointer;
+    transition: all 0.15s;
+    white-space: nowrap;
+  }
+  .icon-btn:hover {
+    background: rgba(255,255,255,0.04);
+    border-color: var(--border-strong);
+    color: var(--text);
+  }
+
+  /* Layout */
+  main {
+    max-width: 880px; margin: 0 auto;
+    padding: 18px 20px 40px;
+    display: grid; gap: 14px;
+  }
+
+  /* Card */
+  .card {
+    background: var(--panel);
+    backdrop-filter: blur(20px) saturate(160%);
+    -webkit-backdrop-filter: blur(20px) saturate(160%);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 18px 20px;
+    transition: border-color 0.2s;
+    animation: fadeUp 0.45s cubic-bezier(0.16, 1, 0.3, 1) backwards;
+  }
+  .card:hover { border-color: var(--border-strong); }
+  .card-title {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 14px; gap: 10px;
+  }
+  .card-title h2 {
+    margin: 0; font-size: 12px; font-weight: 500;
+    color: var(--muted); text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  .card-title .right { display: flex; gap: 8px; align-items: center; }
+  @keyframes fadeUp {
+    from { opacity: 0; transform: translateY(6px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+  main > .card:nth-child(1) { animation-delay: 0.00s; }
+  main > .card:nth-child(2) { animation-delay: 0.05s; }
+  main > .card:nth-child(3) { animation-delay: 0.10s; }
+  main > .card:nth-child(4) { animation-delay: 0.15s; }
+  main > .card:nth-child(5) { animation-delay: 0.20s; }
+
+  /* Phase pill */
+  .phase {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 6px 14px; border-radius: 100px;
+    font-size: 13px; font-weight: 500;
+    background: rgba(255,255,255,0.04);
+    border: 1px solid var(--border);
+    transition: color 0.3s, border-color 0.3s, background 0.3s;
+    white-space: nowrap;
+  }
+  .phase .dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--muted-2);
+    transition: background 0.3s;
+  }
+  .phase.running       { color: var(--accent); border-color: rgba(7,193,96,0.32); background: rgba(7,193,96,0.10); }
+  .phase.running .dot  { background: var(--accent); animation: pulse 1.8s ease-in-out infinite; }
+  .phase.waiting_login { color: var(--warn);   border-color: rgba(245,165,36,0.32); background: rgba(245,165,36,0.10); }
+  .phase.waiting_login .dot { background: var(--warn); animation: pulse 1.8s ease-in-out infinite; }
+  .phase.idle          { color: var(--muted); }
+  .phase.idle .dot     { background: var(--muted-2); }
+  .phase.failed        { color: var(--err);    border-color: rgba(255,91,91,0.32); background: rgba(255,91,91,0.10); }
+  .phase.failed .dot   { background: var(--err); }
+  @keyframes pulse {
+    0%   { box-shadow: 0 0 0 0 currentColor; }
+    70%  { box-shadow: 0 0 0 6px transparent; }
+    100% { box-shadow: 0 0 0 0 transparent; }
+  }
+  /* Header phase: smaller */
+  #header-phase { font-size: 12px; padding: 4px 10px; }
+
+  /* Hero */
+  .hero-top {
+    display: flex; align-items: flex-start; justify-content: space-between;
+    gap: 16px; flex-wrap: wrap;
+  }
+  .phase-block { min-width: 0; flex: 1 1 200px; }
+  .countdown-wrap { text-align: right; flex: 0 0 auto; }
+  .countdown-label {
+    color: var(--muted); font-size: 11px;
+    text-transform: uppercase; letter-spacing: 0.06em;
+    margin-bottom: 2px;
+  }
+  .countdown {
+    font-family: ui-monospace, "SF Mono", "JetBrains Mono", monospace;
+    font-size: 32px; font-weight: 500; letter-spacing: -0.02em;
+    line-height: 1.1; font-variant-numeric: tabular-nums;
+    background: linear-gradient(180deg, #fff 0%, #b8b8c6 100%);
+    -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  .countdown.dim {
+    background: none; -webkit-text-fill-color: var(--muted-2);
+    color: var(--muted-2); font-size: 22px; font-weight: 400;
+  }
+  #login-status { font-size: 13px; color: var(--muted); margin-top: 10px; }
+
+  .hero-meta {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 14px;
+    padding: 14px 0;
+    margin: 16px 0 14px;
+    border-top: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+  }
+  .meta-item .k {
+    font-size: 11px; color: var(--muted);
+    text-transform: uppercase; letter-spacing: 0.06em;
+    margin-bottom: 4px;
+  }
+  .meta-item .v {
+    font-size: 13px; color: var(--text);
+    font-variant-numeric: tabular-nums;
+  }
+  .meta-item .v.mono { font-family: ui-monospace, "SF Mono", monospace; font-size: 12px; }
+  .meta-item .v.ok   { color: var(--accent); }
+  .meta-item .v.warn { color: var(--warn); }
+  .meta-item .v.err  { color: var(--err); }
+
+  /* Buttons */
+  .btn-row { display: flex; gap: 10px; flex-wrap: wrap; }
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+    padding: 11px 18px;
+    border: none; border-radius: 10px;
+    font-size: 13px; font-weight: 500; font-family: inherit;
+    color: #fff; cursor: pointer;
+    transition: transform 0.12s ease, box-shadow 0.2s ease, filter 0.15s;
+    flex: 1 1 0; min-width: 140px; min-height: 44px;
+  }
+  .btn:hover:not(:disabled)  { transform: translateY(-1px); filter: brightness(1.06); }
+  .btn:active:not(:disabled) { transform: translateY(0);    filter: brightness(0.95); }
+  .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+  .btn.primary {
+    background: linear-gradient(180deg, var(--accent) 0%, var(--accent-2) 100%);
+    box-shadow: 0 6px 18px -6px var(--accent-glow);
+  }
+  .btn.danger {
+    background: linear-gradient(180deg, var(--danger-1) 0%, var(--danger-2) 100%);
+    box-shadow: 0 6px 18px -6px rgba(216, 69, 61, 0.32);
+  }
+  .btn.ghost {
+    background: transparent; color: var(--muted);
+    border: 1px solid var(--border);
+    box-shadow: none;
+  }
+  .btn.ghost:hover:not(:disabled) {
+    background: rgba(255,255,255,0.04); color: var(--text);
+    border-color: var(--border-strong);
+  }
+  .btn .spinner {
+    display: none;
+    width: 14px; height: 14px;
+    border: 2px solid rgba(255,255,255,0.3);
+    border-top-color: #fff; border-radius: 50%;
+    animation: spin 0.7s linear infinite; flex: 0 0 auto;
+  }
+  .btn.loading .spinner { display: inline-block; }
+  .btn.loading .label   { opacity: 0.65; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* QR */
+  .qr-wrap {
+    display: flex; flex-direction: column; align-items: center;
+    padding: 6px 0;
+  }
+  .qr-img {
+    width: min(240px, 80%);
+    background: #fff;
+    border-radius: 12px;
+    padding: 12px;
+    margin-bottom: 14px;
+    box-shadow: 0 12px 32px -16px rgba(0,0,0,0.6);
+  }
+  .qr-img img { display: block; width: 100%; height: auto; }
+  .qr-title { font-size: 14px; margin-bottom: 4px; }
+  .qr-msg { color: var(--muted); font-size: 12px; text-align: center; }
+  .qr-empty {
+    text-align: center; color: var(--muted); font-size: 13px;
+    padding: 24px 0;
+  }
+  .qr-empty .big { font-size: 32px; margin-bottom: 8px; }
+
+  /* Logs */
+  .log-list {
+    display: flex; flex-direction: column; gap: 4px;
+    max-height: 320px; overflow-y: auto;
+    padding-right: 4px;
+  }
+  .log-list::-webkit-scrollbar { width: 6px; }
+  .log-list::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 3px; }
+  .log-list::-webkit-scrollbar-track { background: transparent; }
+  .log-entry {
+    display: block;
+    padding: 6px 10px; border-radius: 6px;
+    font-family: ui-monospace, "SF Mono", monospace;
+    font-size: 12px; line-height: 1.5;
+    color: #c9c9d4;
+    background: rgba(255,255,255,0.015);
+    border-left: 2px solid var(--muted-2);
+    word-break: break-all;
+    transition: background 0.15s;
+  }
+  .log-entry:hover { background: rgba(255,255,255,0.04); }
+  .log-entry.success { border-left-color: var(--accent); }
+  .log-entry.error   { border-left-color: var(--err);  color: #ffd9d9; }
+  .log-entry.warning { border-left-color: var(--warn); color: #ffe4be; }
+  .log-entry.info    { border-left-color: var(--info); }
+  .log-empty { color: var(--muted); font-size: 13px; padding: 20px; text-align: center; }
+
+  /* Collapsible */
+  .collapsible-head { cursor: pointer; user-select: none; }
+  .chev {
+    display: inline-block; width: 12px; height: 12px;
+    transform: rotate(180deg); transition: transform 0.25s ease;
+    color: var(--muted); margin-left: 4px;
+  }
+  .collapsed .chev { transform: rotate(90deg); }
+  .collapsible-body {
+    overflow: hidden;
+    transition: grid-template-rows 0.3s ease, opacity 0.25s ease, margin-top 0.25s ease;
+    display: grid; grid-template-rows: 1fr;
+    margin-top: 14px; opacity: 1;
+  }
+  .collapsed .collapsible-body { grid-template-rows: 0fr; opacity: 0; margin-top: 0; }
+  .collapsible-inner { min-height: 0; overflow: hidden; }
+
+  /* Notification config */
+  .notif-channel {
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 14px 16px;
+    margin-bottom: 10px;
+    transition: border-color 0.2s;
+  }
+  .notif-channel:hover { border-color: var(--border-strong); }
+  .notif-head {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 12px; gap: 8px;
+  }
+  .notif-name { font-weight: 500; font-size: 14px; display: flex; align-items: center; gap: 8px; }
+  .notif-status {
+    font-size: 11px; padding: 2px 8px; border-radius: 6px;
+    border: 1px solid transparent;
+  }
+  .notif-status.ok { color: var(--accent); background: rgba(7,193,96,0.10); border-color: rgba(7,193,96,0.24); }
+  .notif-status.no { color: var(--muted);  background: rgba(255,255,255,0.04); border-color: var(--border); }
+  .notif-fields { display: grid; grid-template-columns: 1fr; gap: 10px; }
+  @media (min-width: 640px) { .notif-fields.two { grid-template-columns: 1fr 1fr; } }
+  .notif-field label {
+    display: block; color: var(--muted);
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em;
+    margin-bottom: 4px;
+  }
+  .notif-field input {
+    width: 100%; padding: 9px 12px;
+    background: rgba(0,0,0,0.32);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    font-size: 13px; font-family: inherit;
+    outline: none;
+    transition: border-color 0.2s, box-shadow 0.2s, background 0.2s;
+    min-height: 38px;
+  }
+  .notif-field input::placeholder { color: var(--muted-2); }
+  .notif-field input:focus {
+    border-color: var(--accent);
+    background: rgba(0,0,0,0.5);
+    box-shadow: 0 0 0 3px var(--accent-glow);
+  }
+  .save-bar { display: flex; justify-content: flex-end; margin-top: 12px; }
+  .save-bar .btn { flex: 0 0 auto; min-width: 140px; }
+
+  /* Env table */
+  .env-row {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 7px 4px;
+    border-bottom: 1px solid rgba(255,255,255,0.04);
+    gap: 10px;
+  }
+  .env-row:last-child { border-bottom: none; }
+  .env-row .k { color: var(--muted); font-family: ui-monospace, "SF Mono", monospace; font-size: 12px; }
+  .env-row .v { color: var(--text);  font-family: ui-monospace, "SF Mono", monospace; font-size: 12px;
+                text-align: right; word-break: break-all; }
+  .env-row .v.muted { color: var(--muted-2); }
+  .env-row .v.set   { color: var(--accent); }
+
+  /* Footer */
+  footer {
+    color: var(--muted-2); font-size: 11px;
+    text-align: center;
+    padding: 12px 20px 28px;
+  }
+  footer a { color: var(--muted); }
+  footer a:hover { color: var(--text); }
+
+  /* Toast */
+  .toast-stack {
+    position: fixed; top: 18px; right: 18px; z-index: 200;
+    display: flex; flex-direction: column; gap: 8px;
+    pointer-events: none;
+  }
+  .toast {
+    pointer-events: auto;
+    min-width: 220px; max-width: 340px;
+    background: rgba(22, 22, 28, 0.92);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border: 1px solid var(--border-strong);
+    border-radius: 10px;
+    padding: 11px 14px;
+    color: var(--text);
+    font-size: 13px;
+    box-shadow: 0 14px 32px -10px rgba(0,0,0,0.5);
+    animation: toastIn 0.28s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  .toast.fade { animation: toastOut 0.25s forwards; }
+  .toast.success { border-left: 3px solid var(--accent); }
+  .toast.error   { border-left: 3px solid var(--err); }
+  .toast.info    { border-left: 3px solid var(--info); }
+  @keyframes toastIn  { from { transform: translateX(110%); opacity: 0; } }
+  @keyframes toastOut { to   { transform: translateX(110%); opacity: 0; } }
+
+  /* Modal */
+  .modal-mask {
+    position: fixed; inset: 0; z-index: 150;
+    background: rgba(0,0,0,0.6);
+    backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+    display: none; align-items: center; justify-content: center;
+    padding: 20px;
+    animation: maskIn 0.2s ease;
+  }
+  .modal-mask.show { display: flex; }
+  .modal {
+    background: var(--panel-solid);
+    border: 1px solid var(--border-strong);
+    border-radius: 14px;
+    padding: 22px;
+    max-width: 360px; width: 100%;
+    animation: modalIn 0.28s cubic-bezier(0.16, 1, 0.3, 1);
+    box-shadow: 0 24px 60px -20px rgba(0,0,0,0.7);
+  }
+  .modal h3 { margin: 0 0 8px; font-size: 16px; font-weight: 600; }
+  .modal p  { margin: 0 0 18px; font-size: 13px; color: var(--muted); line-height: 1.6; }
+  .modal .btn-row  { justify-content: flex-end; gap: 8px; }
+  .modal .btn      { flex: 0 0 auto; min-width: 96px; }
+  @keyframes maskIn  { from { opacity: 0; } }
+  @keyframes modalIn { from { opacity: 0; transform: translateY(8px) scale(0.98); } }
+
+  @media (max-width: 600px) {
+    main { padding: 14px; }
+    .countdown-wrap { text-align: left; }
+    .countdown { font-size: 26px; }
+    .btn { flex: 1 1 100%; }
+    .toast-stack { left: 14px; right: 14px; top: 14px; }
+    .toast { max-width: none; min-width: 0; }
+  }
 </style>
 </head>
 <body>
-  <h1>📖 WeRead Challenge <small id="now"></small></h1>
-  <div class="grid">
-    <div class="card">
-      <h2>状态</h2>
-      <div class="row"><span class="k">阶段</span><span class="v"><span id="phase" class="pill idle">—</span></span></div>
-      <div class="row"><span class="k">PID</span><span class="v" id="pid">—</span></div>
-      <div class="row"><span class="k">本次剩余</span><span class="v countdown" id="eta">—</span></div>
-      <div class="row"><span class="k">上次开始</span><span class="v" id="started_at">—</span></div>
-      <div class="row"><span class="k">上次结束</span><span class="v" id="ended_at">—</span></div>
-      <div class="row"><span class="k">上次结果</span><span class="v" id="last_status">—</span></div>
-      <div style="margin-top:10px">
-        <button id="start-btn">▶ 手动触发阅读</button>
-        <button id="restart-btn" class="danger">🔄 重启阅读</button>
+  <header>
+    <div class="header-inner">
+      <div class="brand">
+        <div class="brand-icon">📖</div>
+        <span>WeRead Challenge</span>
+      </div>
+      <div class="header-actions">
+        <span id="header-phase" class="phase idle"><span class="dot"></span><span class="label">空闲</span></span>
+        <a class="icon-btn" href="/logout">退出</a>
       </div>
     </div>
+  </header>
 
-    <div class="card">
-      <h2>登录二维码</h2>
+  <main>
+    <!-- 1. Status hero -->
+    <section class="card">
+      <div class="hero-top">
+        <div class="phase-block">
+          <div class="card-title"><h2>当前状态</h2></div>
+          <div id="phase" class="phase idle"><span class="dot"></span><span class="label">空闲</span></div>
+          <div id="login-status">—</div>
+        </div>
+        <div class="countdown-wrap">
+          <div class="countdown-label">本次剩余</div>
+          <div id="eta" class="countdown dim">—</div>
+        </div>
+      </div>
+
+      <div class="hero-meta">
+        <div class="meta-item"><div class="k">触发</div><div class="v" id="trigger">—</div></div>
+        <div class="meta-item"><div class="k">开始</div><div class="v mono" id="started_at">—</div></div>
+        <div class="meta-item"><div class="k">结束</div><div class="v mono" id="ended_at">—</div></div>
+        <div class="meta-item"><div class="k">结果</div><div class="v" id="last_status">—</div></div>
+      </div>
+
+      <div class="btn-row">
+        <button id="start-btn" class="btn primary">
+          <span class="spinner"></span><span class="label">▶ 开始阅读</span>
+        </button>
+        <button id="restart-btn" class="btn danger">
+          <span class="spinner"></span><span class="label">🔄 重启阅读</span>
+        </button>
+      </div>
+    </section>
+
+    <!-- 2. QR -->
+    <section class="card" id="qr-card">
+      <div class="card-title"><h2>登录</h2></div>
       <div id="qr-block">
-        <div class="qr-empty">等待容器首次启动后生成…</div>
+        <div class="qr-empty">
+          <div class="big">⏳</div>
+          <div>等待状态…</div>
+        </div>
       </div>
-      <div class="row" style="margin-top:6px">
-        <span class="k">二维码时间</span><span class="v" id="qr_age">—</span>
-      </div>
-      <div class="row">
-        <span class="k">cookies</span><span class="v" id="cookies">—</span>
-      </div>
-    </div>
+    </section>
 
-    <div class="card" style="grid-column: 1 / -1">
-      <h2>配置 (敏感值已隐藏)</h2>
-      <div id="env"></div>
-    </div>
+    <!-- 3. Logs -->
+    <section class="card">
+      <div class="card-title">
+        <h2>运行日志</h2>
+        <div class="right">
+          <a class="icon-btn" href="/logs?n=500" target="_blank" rel="noopener">完整日志</a>
+        </div>
+      </div>
+      <div id="logs" class="log-list"><div class="log-empty">加载中…</div></div>
+    </section>
 
-    <div class="card" style="grid-column: 1 / -1">
-      <h2>最近日志 <a href="/logs?n=500" target="_blank" style="float:right;font-size:12px">查看更多</a></h2>
-      <pre class="log" id="logs">加载中…</pre>
+    <!-- 4. Notification config (collapsible, default open) -->
+    <section class="card" id="notif-card">
+      <div class="card-title collapsible-head" data-toggle="notif-card">
+        <h2>通知配置</h2>
+        <div class="right">
+          <span id="notif-summary" style="font-size:11px; color: var(--muted);">—</span>
+          <span class="chev">▾</span>
+        </div>
+      </div>
+      <div class="collapsible-body"><div class="collapsible-inner">
+        <div class="notif-channel">
+          <div class="notif-head">
+            <div class="notif-name">🔔 Bark</div>
+            <span id="bark-status" class="notif-status no">未配置</span>
+          </div>
+          <div class="notif-fields two">
+            <div class="notif-field"><label>Bark Key</label><input id="bark_key" type="password" autocomplete="off" placeholder="Bark Key"></div>
+            <div class="notif-field"><label>Bark URL</label><input id="bark_url" type="text" placeholder="https://api.day.app"></div>
+          </div>
+        </div>
+
+        <div class="notif-channel">
+          <div class="notif-head">
+            <div class="notif-name">✉️ 邮件</div>
+            <span id="email-status" class="notif-status no">未配置</span>
+          </div>
+          <div class="notif-fields two">
+            <div class="notif-field"><label>SMTP 服务器</label><input id="email_smtp" type="text" placeholder="smtp.qq.com"></div>
+            <div class="notif-field"><label>SMTP 端口</label><input id="email_port" type="text" placeholder="465"></div>
+            <div class="notif-field"><label>邮箱用户</label><input id="email_user" type="text" autocomplete="off" placeholder="user@example.com"></div>
+            <div class="notif-field"><label>邮箱密码</label><input id="email_pass" type="password" autocomplete="new-password" placeholder="授权码或密码"></div>
+            <div class="notif-field"><label>发件邮箱</label><input id="email_from" type="text" placeholder="from@example.com"></div>
+            <div class="notif-field"><label>收件邮箱</label><input id="email_to" type="text" placeholder="to@example.com"></div>
+          </div>
+        </div>
+
+        <div class="notif-channel">
+          <div class="notif-head">
+            <div class="notif-name">🪝 Webhook</div>
+            <span id="webhook-status" class="notif-status no">未配置</span>
+          </div>
+          <div class="notif-fields">
+            <div class="notif-field"><label>Webhook URL</label><input id="webhook_url" type="text" placeholder="https://..."></div>
+          </div>
+        </div>
+
+        <div class="save-bar">
+          <button id="notif-save" class="btn primary">
+            <span class="spinner"></span><span class="label">保存通知配置</span>
+          </button>
+        </div>
+      </div></div>
+    </section>
+
+    <!-- 5. Env vars (collapsed by default) -->
+    <section class="card collapsed" id="env-card">
+      <div class="card-title collapsible-head" data-toggle="env-card">
+        <h2>环境变量</h2>
+        <div class="right">
+          <span style="font-size:11px; color: var(--muted);">敏感值已隐藏</span>
+          <span class="chev">▾</span>
+        </div>
+      </div>
+      <div class="collapsible-body"><div class="collapsible-inner">
+        <div id="env"></div>
+      </div></div>
+    </section>
+  </main>
+
+  <footer>
+    weread-challenge-hf · auto-refresh 30s · <span id="now">—</span>
+    · <a href="/status" target="_blank">/status</a>
+    · <a href="/healthz" target="_blank">/healthz</a>
+    · <a href="/logout">退出登录</a>
+  </footer>
+
+  <div class="toast-stack" id="toasts"></div>
+  <div class="modal-mask" id="modal-mask">
+    <div class="modal">
+      <h3 id="modal-title">确认</h3>
+      <p id="modal-body"></p>
+      <div class="btn-row">
+        <button class="btn ghost" id="modal-cancel">取消</button>
+        <button class="btn danger" id="modal-ok">确定</button>
+      </div>
     </div>
   </div>
-  <div class="footer">
-    <a href="/logout">退出登录</a> · auto-refresh 30s · <a href="/status">/status</a> · <a href="/healthz">/healthz</a>
-  </div>
 
+{% raw %}
 <script>
-const $ = (id) => document.getElementById(id);
+(function () {
+  "use strict";
 
-function fmtSeconds(s) {
-  if (s == null) return "—";
-  s = Math.max(0, Math.round(s));
-  const m = Math.floor(s / 60), sec = s % 60;
-  return String(m).padStart(2,"0") + ":" + String(sec).padStart(2,"0");
-}
-function fmtAge(s) {
-  if (s == null) return "—";
-  if (s < 60) return Math.round(s) + "s 前";
-  if (s < 3600) return Math.round(s/60) + "min 前";
-  if (s < 86400) return Math.round(s/3600) + "h 前";
-  return Math.round(s/86400) + "d 前";
-}
-function fmtTime(iso) {
-  if (!iso) return "—";
-  try { return new Date(iso).toLocaleString(); } catch { return iso; }
-}
+  const $ = (id) => document.getElementById(id);
+  const PHASE_LABELS   = { running: "阅读中", waiting_login: "等待登录", idle: "空闲", failed: "上次失败" };
+  const TRIGGER_LABELS = { initial: "启动", manual: "手动", scheduler: "定时" };
+  const SECRET_KEYS    = new Set(["bark_key", "email_pass"]);
+  let lastNotifConfig  = {};
 
-async function refresh() {
-  $("now").textContent = new Date().toLocaleTimeString();
-  let data;
-  try {
-    const resp = await fetch("/status", {cache: "no-store"});
-    if (resp.status === 401) { window.location.href = "/login"; return; }
-    data = await resp.json();
-  } catch (e) {
-    return;
+  /* ---------- Formatters ---------- */
+  function fmtSeconds(s) {
+    if (s == null) return "—";
+    s = Math.max(0, Math.round(s));
+    const m = Math.floor(s / 60), sec = s % 60;
+    return String(m).padStart(2, "0") + ":" + String(sec).padStart(2, "0");
   }
-  const r = data.reading || {};
-  const lr = r.last_run || {};
-  const phaseEl = $("phase");
-  phaseEl.className = "pill " + (r.phase || "idle");
-  phaseEl.textContent = ({
-    running: "运行中", waiting_login: "等待登录", idle: "空闲", failed: "上次失败"
-  })[r.phase] || r.phase || "—";
-
-  $("pid").textContent = r.pid || "—";
-  $("eta").textContent = fmtSeconds(r.eta_seconds);
-  $("started_at").textContent = fmtTime(lr.started_at);
-  $("ended_at").textContent = fmtTime(lr.ended_at);
-  $("last_status").textContent = lr.status
-    ? lr.status + (lr.exit_code != null ? " (code " + lr.exit_code + ")" : "")
-    : "—";
-
-  const c = r.cookies || {};
-  $("cookies").textContent = c.status === "valid"
-    ? "valid · " + (c.age_days ? c.age_days.toFixed(1) : "?") + " 天前"
-    : c.status || "—";
-
-  const qr = r.login_qr || {};
-  const block = $("qr-block");
-  if (qr.present) {
-    block.innerHTML = '<img class="qr" src="/login.png?t=' + Date.now() + '" alt="login QR">';
-  } else {
-    block.innerHTML = '<div class="qr-empty">尚未生成二维码（cookies 有效时不会生成）</div>';
+  function fmtAge(s) {
+    if (s == null) return "—";
+    if (s < 60)    return Math.round(s) + " 秒前";
+    if (s < 3600)  return Math.round(s / 60) + " 分钟前";
+    if (s < 86400) return Math.round(s / 3600) + " 小时前";
+    return Math.round(s / 86400) + " 天前";
   }
-  $("qr_age").textContent = fmtAge(qr.age_seconds);
+  function fmtTime(iso) {
+    if (!iso) return "—";
+    try {
+      const d = new Date(iso);
+      const now = new Date();
+      const sameDay = d.toDateString() === now.toDateString();
+      const opts = sameDay
+        ? { hour: "2-digit", minute: "2-digit" }
+        : { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" };
+      return d.toLocaleString(undefined, opts);
+    } catch (e) { return iso; }
+  }
+  function escapeHtml(s) {
+    return String(s == null ? "" : s)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  }
 
-  const envEl = $("env");
-  envEl.innerHTML = "";
-  Object.entries(data.env || {}).forEach(([k, v]) => {
-    const div = document.createElement("div");
-    div.className = "row";
-    div.innerHTML = '<span class="k">' + k + '</span><span class="v">' + (v || "—") + '</span>';
-    envEl.appendChild(div);
+  /* ---------- Toast & Modal ---------- */
+  function toast(msg, type) {
+    type = type || "info";
+    const el = document.createElement("div");
+    el.className = "toast " + type;
+    el.textContent = msg;
+    $("toasts").appendChild(el);
+    setTimeout(() => {
+      el.classList.add("fade");
+      setTimeout(() => el.remove(), 280);
+    }, 2800);
+  }
+  function confirmModal(title, body, okText, isDanger) {
+    return new Promise((resolve) => {
+      $("modal-title").textContent = title;
+      $("modal-body").textContent  = body;
+      const okBtn = $("modal-ok");
+      okBtn.textContent = okText || "确定";
+      okBtn.className   = "btn " + (isDanger ? "danger" : "primary");
+      $("modal-mask").classList.add("show");
+      const close = (val) => {
+        $("modal-mask").classList.remove("show");
+        okBtn.removeEventListener("click", onOk);
+        $("modal-cancel").removeEventListener("click", onCancel);
+        resolve(val);
+      };
+      const onOk = () => close(true);
+      const onCancel = () => close(false);
+      okBtn.addEventListener("click", onOk);
+      $("modal-cancel").addEventListener("click", onCancel);
+    });
+  }
+
+  /* ---------- Collapsible ---------- */
+  document.addEventListener("click", (ev) => {
+    const head = ev.target.closest(".collapsible-head");
+    if (!head) return;
+    const id = head.getAttribute("data-toggle");
+    if (id) $(id).classList.toggle("collapsed");
   });
 
-  $("start-btn").disabled = (r.phase === "running");
-  $("restart-btn").disabled = false;
-}
-
-async function loadLogs() {
-  try {
-    const txt = await (await fetch("/logs?n=120", {cache: "no-store"})).text();
-    $("logs").textContent = txt || "(空)";
-    const pre = $("logs"); pre.scrollTop = pre.scrollHeight;
-  } catch {}
-}
-
-$("start-btn").addEventListener("click", async () => {
-  $("start-btn").disabled = true;
-  try {
-    const r = await fetch("/start", {method: "POST"});
-    if (!r.ok) {
-      const j = await r.json().catch(() => ({}));
-      alert("触发失败：" + (j.reason || r.status));
-    }
-  } catch (e) {
-    alert("请求失败：" + e);
-  } finally { setTimeout(refresh, 1000); }
-});
-
-$("restart-btn").addEventListener("click", async () => {
-  $("restart-btn").disabled = true;
-  $("restart-btn").textContent = "重启中…";
-  try {
-    const r = await fetch("/restart", {method: "POST"});
-    if (!r.ok) alert("重启失败：" + r.status);
-  } catch (e) {
-    alert("请求失败：" + e);
-  } finally {
-    setTimeout(() => {
-      $("restart-btn").disabled = false;
-      $("restart-btn").textContent = "🔄 重启阅读";
-      refresh();
-      loadLogs();
-    }, 6000);
+  /* ---------- Render status ---------- */
+  function applyPhase(el, phaseKey) {
+    el.className = "phase " + phaseKey;
+    el.innerHTML =
+      '<span class="dot"></span><span class="label">' +
+      escapeHtml(PHASE_LABELS[phaseKey] || phaseKey) + "</span>";
   }
-});
 
-refresh(); loadLogs();
-setInterval(refresh, 30000);
-setInterval(loadLogs, 30000);
+  async function refresh() {
+    $("now").textContent = new Date().toLocaleString();
+    let data;
+    try {
+      const resp = await fetch("/status", { cache: "no-store" });
+      if (resp.status === 401) { window.location.href = "/login"; return; }
+      data = await resp.json();
+    } catch (e) { return; }
+
+    const r  = data.reading || {};
+    const lr = r.last_run   || {};
+    const phaseKey = r.phase || "idle";
+    applyPhase($("phase"),        phaseKey);
+    applyPhase($("header-phase"), phaseKey);
+
+    const etaEl = $("eta");
+    if (phaseKey === "running" && r.eta_seconds != null) {
+      etaEl.textContent = fmtSeconds(r.eta_seconds);
+      etaEl.classList.remove("dim");
+    } else {
+      etaEl.classList.add("dim");
+      etaEl.textContent = phaseKey === "waiting_login" ? "扫码中" : "—";
+    }
+
+    const c = r.cookies || {};
+    const ls = $("login-status");
+    if (c.status === "valid") {
+      ls.textContent = "✅ 已登录 · " + (c.age_days != null ? c.age_days.toFixed(1) + " 天前" : "近期");
+    } else if (c.status === "expired") {
+      ls.textContent = "⚠️ 登录已过期" + (c.age_days != null ? " (" + c.age_days.toFixed(0) + " 天)" : "");
+    } else {
+      ls.textContent = "❌ 未登录";
+    }
+
+    $("trigger").textContent     = TRIGGER_LABELS[lr.trigger] || lr.trigger || "—";
+    $("started_at").textContent  = fmtTime(lr.started_at);
+    $("ended_at").textContent    = fmtTime(lr.ended_at);
+    const last = $("last_status");
+    if (!lr.status) {
+      last.textContent = "—"; last.className = "v";
+    } else if (lr.status === "completed") {
+      last.textContent = "✓ 成功"; last.className = "v ok";
+    } else if (lr.status === "failed") {
+      last.textContent = "✗ 失败 (" + (lr.exit_code != null ? lr.exit_code : "?") + ")";
+      last.className   = "v err";
+    } else if (lr.status === "running") {
+      last.textContent = "⏳ 运行中"; last.className = "v warn";
+    } else {
+      last.textContent = lr.status; last.className = "v";
+    }
+
+    /* QR card */
+    const qr      = r.login_qr || {};
+    const qrCard  = $("qr-card");
+    const qrBlock = $("qr-block");
+    if (c.status === "valid" && !qr.fresh) {
+      qrCard.style.display = "none";
+    } else {
+      qrCard.style.display = "";
+      if (qr.present) {
+        qrBlock.innerHTML =
+          '<div class="qr-wrap">' +
+            '<div class="qr-img"><img src="/login.png?t=' + Date.now() + '" alt="login QR"></div>' +
+            '<div class="qr-title">微信扫码登录</div>' +
+            '<div class="qr-msg">二维码 5 分钟内有效，过期请点击「重启阅读」</div>' +
+            '<div class="qr-msg" style="margin-top:6px;">最后更新：' + escapeHtml(fmtAge(qr.age_seconds)) + "</div>" +
+          "</div>";
+      } else {
+        const big = c.status === "valid" ? "✅" : "⏳";
+        const msg = c.status === "valid" ? "已登录，无需扫码" : "尚未生成二维码，请等待或点击「开始阅读」";
+        qrBlock.innerHTML =
+          '<div class="qr-empty"><div class="big">' + big + "</div><div>" + msg + "</div></div>";
+      }
+    }
+
+    /* Env */
+    const envEl = $("env");
+    envEl.innerHTML = "";
+    Object.entries(data.env || {}).forEach(([k, v]) => {
+      const cls = !v ? "v muted" : (v === "***set***" ? "v set" : "v");
+      const text = v || "—";
+      const row  = document.createElement("div");
+      row.className = "env-row";
+      row.innerHTML = '<span class="k">' + escapeHtml(k) + '</span>' +
+                      '<span class="' + cls + '">' + escapeHtml(text) + "</span>";
+      envEl.appendChild(row);
+    });
+
+    /* Notif summary */
+    const notifs = (data.notifications || {}).channels || [];
+    const okN = notifs.filter((n) => n.configured).length;
+    $("notif-summary").textContent = okN > 0 ? okN + " 个已启用" : "未配置";
+
+    $("start-btn").disabled = (phaseKey === "running");
+  }
+
+  /* ---------- Logs ---------- */
+  async function loadLogs() {
+    const wrap = $("logs");
+    try {
+      const resp = await fetch("/logs/clean?n=30", { cache: "no-store" });
+      if (resp.status === 401) { window.location.href = "/login"; return; }
+      const data = await resp.json();
+      const entries = data.entries || [];
+      if (entries.length === 0) {
+        wrap.innerHTML = '<div class="log-empty">暂无日志</div>';
+        return;
+      }
+      wrap.innerHTML = "";
+      entries.forEach((e) => {
+        const div = document.createElement("div");
+        div.className   = "log-entry " + (e.level || "info");
+        div.textContent = e.text;
+        wrap.appendChild(div);
+      });
+      wrap.scrollTop = wrap.scrollHeight;
+    } catch (e) {
+      wrap.innerHTML = '<div class="log-empty">日志加载失败</div>';
+    }
+  }
+
+  /* ---------- Notification config ---------- */
+  function renderChannelStatus(channelKey, requiredFields) {
+    const cfg = lastNotifConfig[channelKey] || {};
+    const filled = (k) => {
+      const v = cfg[k];
+      return v && v !== "";
+    };
+    const allSet  = requiredFields.every(filled);
+    const anySet  = requiredFields.some(filled);
+    const el = $(channelKey + "-status");
+    if (allSet)      { el.textContent = "已配置";   el.className = "notif-status ok"; }
+    else if (anySet) { el.textContent = "部分配置"; el.className = "notif-status no"; }
+    else             { el.textContent = "未配置";   el.className = "notif-status no"; }
+  }
+
+  async function loadNotif() {
+    try {
+      const resp = await fetch("/api/notification", { cache: "no-store" });
+      if (!resp.ok) return;
+      const data = await resp.json();
+      lastNotifConfig = data.config || {};
+      Object.entries(lastNotifConfig).forEach(([ch, fields]) => {
+        Object.entries(fields).forEach(([k, v]) => {
+          const input = $(k);
+          if (!input) return;
+          if (v === "***set***") {
+            input.value = "";
+            input.placeholder = "已配置（留空则保留）";
+          } else {
+            input.value = v || "";
+          }
+        });
+      });
+      renderChannelStatus("bark",    ["bark_key"]);
+      renderChannelStatus("email",   ["email_user", "email_pass", "email_to", "email_smtp"]);
+      renderChannelStatus("webhook", ["webhook_url"]);
+    } catch (e) { /* ignore */ }
+  }
+
+  function collectChannel(keys, channelKey) {
+    const out  = {};
+    const orig = lastNotifConfig[channelKey] || {};
+    keys.forEach((k) => {
+      const el = $(k);
+      const val = (el ? el.value : "").trim();
+      if (!val && SECRET_KEYS.has(k) && orig[k] === "***set***") {
+        out[k] = "***set***";
+      } else {
+        out[k] = val;
+      }
+    });
+    return out;
+  }
+
+  async function saveNotif() {
+    const btn = $("notif-save");
+    btn.classList.add("loading"); btn.disabled = true;
+    const body = {
+      bark:    collectChannel(["bark_key", "bark_url"], "bark"),
+      email:   collectChannel(["email_user", "email_pass", "email_to", "email_from", "email_smtp", "email_port"], "email"),
+      webhook: collectChannel(["webhook_url"], "webhook"),
+    };
+    try {
+      const resp = await fetch("/api/notification", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (resp.ok) {
+        toast("通知配置已保存", "success");
+        await loadNotif();
+      } else {
+        toast("保存失败：" + resp.status, "error");
+      }
+    } catch (e) {
+      toast("请求失败", "error");
+    } finally {
+      btn.classList.remove("loading"); btn.disabled = false;
+    }
+  }
+
+  /* ---------- Buttons ---------- */
+  $("start-btn").addEventListener("click", async () => {
+    const btn = $("start-btn");
+    btn.classList.add("loading"); btn.disabled = true;
+    try {
+      const r = await fetch("/start", { method: "POST" });
+      const j = await r.json().catch(() => ({}));
+      if (r.ok && j.ok) {
+        toast("已开始阅读 · PID " + j.spawned_pid, "success");
+      } else {
+        const reason = j.reason === "already running" ? "已经在阅读中" : (j.reason || ("HTTP " + r.status));
+        toast("触发失败：" + reason, "error");
+      }
+    } catch (e) {
+      toast("请求失败", "error");
+    } finally {
+      setTimeout(() => {
+        btn.classList.remove("loading");
+        refresh(); loadLogs();
+      }, 800);
+    }
+  });
+
+  $("restart-btn").addEventListener("click", async () => {
+    const ok = await confirmModal("重启阅读", "将终止当前阅读进程并重新启动。继续？", "重启", true);
+    if (!ok) return;
+    const btn = $("restart-btn");
+    btn.classList.add("loading"); btn.disabled = true;
+    try {
+      const r = await fetch("/restart", { method: "POST" });
+      if (r.ok) {
+        const j = await r.json().catch(() => ({}));
+        toast("已重启阅读 · PID " + (j.spawned_pid || "?"), "success");
+      } else {
+        toast("重启失败：HTTP " + r.status, "error");
+      }
+    } catch (e) {
+      toast("请求失败", "error");
+    } finally {
+      setTimeout(() => {
+        btn.classList.remove("loading"); btn.disabled = false;
+        refresh(); loadLogs();
+      }, 4000);
+    }
+  });
+
+  $("notif-save").addEventListener("click", saveNotif);
+
+  /* ---------- Init ---------- */
+  refresh(); loadLogs(); loadNotif();
+  setInterval(refresh,  30000);
+  setInterval(loadLogs, 30000);
+})();
 </script>
+{% endraw %}
 </body>
 </html>
 """
