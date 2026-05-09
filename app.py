@@ -199,6 +199,7 @@ def _reading_state() -> dict:
         "login_qr": {"present": LOGIN_PNG.exists(), "fresh": qr_fresh, "age_seconds": qr_age},
         "last_run": last,
         "eta_seconds": eta_seconds,
+        "is_paused": _is_paused(pid),
         "now": _utcnow().isoformat(),
     }
 
@@ -1594,8 +1595,9 @@ _INDEX_HTML = r"""<!doctype html>
     const qr      = r.login_qr || {};
     const qrCard  = $("qr-card");
     const qrBlock = $("qr-block");
-    if (c.status === "valid" && !qr.fresh) {
-      qrCard.style.display = "none";
+    if (c.status === "valid") {
+      qrCard.style.display = "";
+      qrBlock.innerHTML = '<div class="qr-empty"><div class="big">✅</div><div>已登录，无需扫码</div><div style="margin-top:8px;color:var(--muted-2);font-size:11px">点击「重启」可刷新二维码重新登录</div></div>';
     } else {
       qrCard.style.display = "";
       if (qr.present) {
