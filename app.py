@@ -196,6 +196,26 @@ def _public_env() -> dict:
     return out
 
 
+def _notification_status() -> dict:
+    """Check which notification channels are configured."""
+    channels = []
+    if os.environ.get("BARK_KEY"):
+        channels.append({"name": "Bark", "configured": True})
+    else:
+        channels.append({"name": "Bark", "configured": False})
+
+    email_fields = ["EMAIL_USER", "EMAIL_PASS", "EMAIL_TO", "EMAIL_SMTP"]
+    email_set = all(os.environ.get(f) for f in email_fields)
+    channels.append({"name": "Email", "configured": email_set, "missing_fields": [f for f in email_fields if not os.environ.get(f)]})
+
+    if os.environ.get("WEBHOOK_URL"):
+        channels.append({"name": "Webhook", "configured": True})
+    else:
+        channels.append({"name": "Webhook", "configured": False})
+
+    return {"channels": channels, "any_configured": any(c["configured"] for c in channels)}
+
+
 # ─── Background workers ───────────────────────────────────────────────────────
 def _spawn_reader(trigger: str) -> int:
     proc = subprocess.Popen(
@@ -226,7 +246,7 @@ def _start_background_threads() -> None:
 # ─── Routes ───────────────────────────────────────────────────────────────────
 @app.route("/status")
 def route_status() -> Response:
-    return jsonify({"reading": _reading_state(), "env": _public_env()})
+    return jsonify({"reading": _reading_state(), "env": _public_env(), "notifications": _notification_status()})
 
 
 @app.route("/login.png")
@@ -279,6 +299,53 @@ def route_logs() -> Response:
         tail = f.read().decode("utf-8", errors="replace").splitlines()[-n:]
     return Response("\n".join(tail), mimetype="text/plain")
 
+
+
+
+@app.route("/logs/clean")
+def route_logs_clean() -> Response:
+    """Return filtered, structured log entries."""
+    n = max(1, min(int(request.args.get("n", 50)), 500))
+    if not APP_LOG.exists():
+        return jsonify({"entries": [], "total": 0})
+
+    import re
+    # Keywords that indicate meaningful log lines
+    meaningful = re.compile(
+        r'(start_reading|login|cookie|reading|error|fail|success|complet|warn|'
+        r'screenshot|book|duration|prune|✓|✗|▶|initial|manual|scheduler|'
+        r'starting|finished|exited|run )',
+        re.IGNORECASE,
+    )
+
+    with APP_LOG.open("r", encoding="utf-8", errors="replace") as f:
+        all_lines = f.readlines()
+
+    entries = []
+    for line in all_lines:
+        stripped = line.rstrip("\n")
+        if not stripped.strip():
+            continue
+        if not meaningful.search(stripped):
+            continue
+
+        # Determine level
+        lower = stripped.lower()
+        if "error" in lower or "fail" in lower or "✗" in stripped:
+            level = "error"
+        elif "success" in lower or "complet" in lower or "✓" in stripped:
+            level = "success"
+        elif "warn" in lower:
+            level = "warning"
+        else:
+            level = "info"
+
+        entries.append({"text": stripped, "level": level})
+
+    # Take last N entries
+    total = len(entries)
+    entries = entries[-n:]
+    return jsonify({"entries": entries, "total": total})
 
 @app.route("/healthz")
 def route_health() -> Response:
