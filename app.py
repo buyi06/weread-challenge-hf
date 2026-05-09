@@ -205,6 +205,11 @@ def _notification_status() -> dict:
     else:
         channels.append({"name": "Bark", "configured": False})
 
+    if os.environ.get("PUSHPLUS_TOKEN"):
+        channels.append({"name": "PushPlus", "configured": True})
+    else:
+        channels.append({"name": "PushPlus", "configured": False})
+
     email_fields = ["EMAIL_USER", "EMAIL_PASS", "EMAIL_TO", "EMAIL_SMTP"]
     email_set = all(os.environ.get(f) for f in email_fields)
     channels.append({"name": "Email", "configured": email_set, "missing_fields": [f for f in email_fields if not os.environ.get(f)]})
@@ -352,6 +357,7 @@ def route_logs_clean() -> Response:
 # ─── Notification config ──────────────────────────────────────────────────────
 NOTIF_SCHEMA = {
     "bark": {"bark_key": "", "bark_url": "https://api.day.app"},
+    "pushplus": {"pushplus_token": ""},
     "email": {
         "email_user": "", "email_pass": "", "email_to": "",
         "email_from": "", "email_smtp": "", "email_port": "465",
@@ -359,13 +365,14 @@ NOTIF_SCHEMA = {
     "webhook": {"webhook_url": ""},
 }
 
-_NOTIF_SECRET_FIELDS = {"bark_key", "email_pass"}
+_NOTIF_SECRET_FIELDS = {"bark_key", "pushplus_token", "email_pass"}
 _NOTIF_ENV_MAP = {
     "bark_key": "BARK_KEY",
     "email_user": "EMAIL_USER", "email_pass": "EMAIL_PASS",
     "email_to": "EMAIL_TO",     "email_from": "EMAIL_FROM",
     "email_smtp": "EMAIL_SMTP", "email_port": "EMAIL_PORT",
     "webhook_url": "WEBHOOK_URL",
+    "pushplus_token": "PUSHPLUS_TOKEN",
 }
 
 
@@ -1247,6 +1254,16 @@ _INDEX_HTML = r"""<!doctype html>
 
         <div class="notif-channel">
           <div class="notif-head">
+            <div class="notif-name">💬 PushPlus</div>
+            <span id="pushplus-status" class="notif-status no">未配置</span>
+          </div>
+          <div class="notif-fields">
+            <div class="notif-field"><label>Token</label><input id="pushplus_token" type="password" placeholder="微信扫码关注 PushPlus 后获取"></div>
+          </div>
+        </div>
+
+        <div class="notif-channel">
+          <div class="notif-head">
             <div class="notif-name">🪝 Webhook</div>
             <span id="webhook-status" class="notif-status no">未配置</span>
           </div>
@@ -1305,7 +1322,7 @@ _INDEX_HTML = r"""<!doctype html>
   const $ = (id) => document.getElementById(id);
   const PHASE_LABELS   = { running: "阅读中", waiting_login: "等待登录", idle: "空闲", failed: "上次失败" };
   const TRIGGER_LABELS = { initial: "启动", manual: "手动", scheduler: "定时" };
-  const SECRET_KEYS    = new Set(["bark_key", "email_pass"]);
+  const const SECRET_KEYS = new Set(["bark_key", "pushplus_token", "email_pass"]);
   let lastNotifConfig  = {};
 
   /* ---------- Formatters ---------- */
@@ -1545,6 +1562,7 @@ _INDEX_HTML = r"""<!doctype html>
       });
       renderChannelStatus("bark",    ["bark_key"]);
       renderChannelStatus("email",   ["email_user", "email_pass", "email_to", "email_smtp"]);
+      renderChannelStatus("pushplus", ["pushplus_token"]);
       renderChannelStatus("webhook", ["webhook_url"]);
     } catch (e) { /* ignore */ }
   }
@@ -1568,9 +1586,10 @@ _INDEX_HTML = r"""<!doctype html>
     const btn = $("notif-save");
     btn.classList.add("loading"); btn.disabled = true;
     const body = {
-      bark:    collectChannel(["bark_key", "bark_url"], "bark"),
-      email:   collectChannel(["email_user", "email_pass", "email_to", "email_from", "email_smtp", "email_port"], "email"),
-      webhook: collectChannel(["webhook_url"], "webhook"),
+      bark:     collectChannel(["bark_key", "bark_url"], "bark"),
+      pushplus: collectChannel(["pushplus_token"], "pushplus"),
+      email:    collectChannel(["email_user", "email_pass", "email_to", "email_from", "email_smtp", "email_port"], "email"),
+      webhook:  collectChannel(["webhook_url"], "webhook"),
     };
     try {
       const resp = await fetch("/api/notification", {
