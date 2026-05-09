@@ -1,4 +1,4 @@
-<p align="center"><img src="https://linux.do/logo-32.svg" width="40"></p>
+
 
 <h1 align="center">weread-challenge-hf</h1>
 
