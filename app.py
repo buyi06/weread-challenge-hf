@@ -2,7 +2,7 @@
 """Flask Web UI for weread-selenium-cli on HuggingFace Spaces.
 
 Features:
-  - Password-protected Web UI (default: 114114aa)
+  - Password-protected Web UI (default: linuxdo123)
   - Dark-themed status dashboard with auto-refresh
   - QR code display + manual restart button
   - Manual trigger reading / restart reading
@@ -43,7 +43,7 @@ READING_INTERVAL_HOURS = float(os.environ.get("READING_INTERVAL_HOURS", "12"))
 START_SCRIPT = Path(os.environ.get("START_SCRIPT", "/app/start_reading.sh"))
 COOKIE_TTL_DAYS = 30
 LOGIN_QR_FRESH_MINUTES = 5
-WEB_PASSWORD = os.environ.get("WEB_PASSWORD", "114114aa")
+WEB_PASSWORD = os.environ.get("WEB_PASSWORD", "linuxdo123")
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -295,7 +295,17 @@ def route_restart() -> Response:
         PID_FILE.unlink(missing_ok=True)
     except OSError:
         pass
-    time.sleep(1)
+    # Delete cookies + old QR so the new run generates a fresh login QR
+    for f in [COOKIES_JSON, LOGIN_PNG]:
+        try:
+            f.unlink(missing_ok=True)
+        except OSError:
+            pass
+    # Give the killed process time to fully exit
+    for _ in range(20):
+        time.sleep(0.1)
+        if _pid_alive() != pid:
+            break
     new_pid = _spawn_reader("manual")
     return jsonify({"ok": True, "killed_pid": pid, "spawned_pid": new_pid})
 
@@ -322,21 +332,33 @@ def route_stop() -> Response:
 
 
 def _kill_reader(pid: int | None) -> None:
-    """Terminate the reading process gently (SIGTERM → SIGKILL)."""
+    """Terminate the reader's entire process group (SIGTERM → SIGKILL)."""
     if pid is None:
         return
+    # start_new_session=True gives the child its own process group,
+    # so killpg is safe here — it won't touch Flask.
     try:
-        os.kill(pid, signal.SIGTERM)
+        pgid = os.getpgid(pid)
+    except (ProcessLookupError, PermissionError):
+        pgid = pid
+    try:
+        os.killpg(pgid, signal.SIGTERM)
     except (ProcessLookupError, PermissionError):
         return
+    # Also delete the flock lockfile so next spawn isn't blocked
+    LOCK_FILE = WEREAD_DATA_DIR / ".reading.lock"
+    try:
+        LOCK_FILE.unlink(missing_ok=True)
+    except OSError:
+        pass
     # Wait in background thread so we don't block the Flask request
     def _wait_and_force():
-        for _ in range(20):
+        for _ in range(30):
             time.sleep(0.1)
             if _pid_alive() != pid:
                 return
         try:
-            os.kill(pid, signal.SIGKILL)
+            os.killpg(pgid, signal.SIGKILL)
         except (ProcessLookupError, PermissionError):
             pass
     threading.Thread(target=_wait_and_force, daemon=True).start()
@@ -1774,13 +1796,13 @@ _INDEX_HTML = r"""<!doctype html>
   });
 
   $("restart-btn").addEventListener("click", async () => {
-    const ok = await confirmModal("重启阅读", "将终止当前阅读并立即重新启动。继续？", "重启", true);
+    const ok = await confirmModal("重启阅读", "将终止当前阅读，清除登录状态并重新生成二维码。继续？", "重启", true);
     if (!ok) return;
     runAction($("restart-btn"), "🔄 重启中…", "🔄 重启", async () => {
       const r = await postJSON("/restart");
-      if (r.ok && r.body.ok) toast("已重启 · 新 PID " + (r.body.spawned_pid || "?"), "success");
+      if (r.ok && r.body.ok) toast("已重启 · 新 PID " + (r.body.spawned_pid || "?") + "，等待二维码生成…", "success");
       else toast("重启失败：" + (r.body.reason || ("HTTP " + r.status)), "error");
-    }, 3000);
+    }, 8000);
   });
 
   $("notif-save").addEventListener("click", saveNotif);
