@@ -1,5 +1,3 @@
-https://linux.do/logo-32.svg
-
 # weread-challenge-hf
 
 将 [weread-challenge-selenium](https://github.com/jqknono/weread-challenge-selenium) 改造为适配 HuggingFace Spaces 的单容器版本。
