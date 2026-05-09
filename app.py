@@ -2,12 +2,11 @@
 """Flask Web UI for weread-selenium-cli on HuggingFace Spaces.
 
 Features:
-  - Password-protected Web UI (default: 114114aa)
+  - Password-protected Web UI (default: linuxdo123)
   - Dark-themed status dashboard with auto-refresh
-  - QR code display + manual refresh button
+  - QR code display + manual restart button
   - Manual trigger reading / restart reading
   - Background scheduler (every N hours)
-  - Self-pinger to prevent HF idle sleep
 
 Endpoints:
   GET  /          dashboard (requires login)
@@ -16,7 +15,7 @@ Endpoints:
   POST /start     trigger reading (requires login)
   POST /restart   kill + restart reading (requires login)
   GET  /logs      tail app.log (requires login)
-  GET  /healthz   health check (no auth, for self-ping)
+  GET  /healthz   health check (no auth, for external ping)
   GET  /login     login page
   POST /login     authenticate
   GET  /logout    clear session
@@ -31,10 +30,9 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.request import urlopen
 
 from flask import (
-    Flask, Response, abort, jsonify, make_response, redirect,
+    Flask, Response, abort, jsonify, redirect,
     render_template_string, request, send_file, session,
 )
 
@@ -42,11 +40,10 @@ from flask import (
 DATA_DIR = Path(os.environ.get("WEREAD_DATA_DIR", "/data/.weread"))
 PORT = int(os.environ.get("PORT", "7860"))
 READING_INTERVAL_HOURS = float(os.environ.get("READING_INTERVAL_HOURS", "12"))
-SELF_PING_MINUTES = float(os.environ.get("SELF_PING_MINUTES", "5"))
 START_SCRIPT = Path(os.environ.get("START_SCRIPT", "/app/start_reading.sh"))
 COOKIE_TTL_DAYS = 30
 LOGIN_QR_FRESH_MINUTES = 5
-WEB_PASSWORD = os.environ.get("WEB_PASSWORD", "114114aa")
+WEB_PASSWORD = os.environ.get("WEB_PASSWORD", "linuxdo123")
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -59,7 +56,7 @@ APP_LOG = DATA_DIR / "app.log"
 PUBLIC_ENV_KEYS = (
     "WEREAD_BROWSER", "WEREAD_DATA_DIR", "WEREAD_DURATION", "WEREAD_SPEED",
     "WEREAD_SELECTION", "WEREAD_SCREENSHOT", "WEREAD_AGREE_TERMS",
-    "DEFAULT_BOOK_URL", "READING_INTERVAL_HOURS", "SELF_PING_MINUTES",
+    "DEFAULT_BOOK_URL", "READING_INTERVAL_HOURS",
 )
 SECRET_ENV_KEYS = (
     "BARK_KEY", "EMAIL_PASS", "EMAIL_USER", "EMAIL_TO", "EMAIL_FROM", "EMAIL_SMTP",
@@ -212,7 +209,6 @@ def _spawn_reader(trigger: str) -> int:
 
 def _scheduler_loop() -> None:
     interval = max(60.0, READING_INTERVAL_HOURS * 3600)
-    # Stagger first run slightly after entrypoint's initial run.
     time.sleep(interval)
     while True:
         try:
@@ -223,21 +219,8 @@ def _scheduler_loop() -> None:
         time.sleep(interval)
 
 
-def _self_ping_loop() -> None:
-    interval = max(60.0, SELF_PING_MINUTES * 60)
-    url = f"http://127.0.0.1:{PORT}/healthz"
-    while True:
-        time.sleep(interval)
-        try:
-            with urlopen(url, timeout=10) as resp:
-                resp.read(64)
-        except Exception:
-            pass
-
-
 def _start_background_threads() -> None:
     threading.Thread(target=_scheduler_loop, name="reader-scheduler", daemon=True).start()
-    threading.Thread(target=_self_ping_loop, name="self-pinger", daemon=True).start()
 
 
 # ─── Routes ───────────────────────────────────────────────────────────────────
@@ -274,7 +257,6 @@ def route_restart() -> Response:
                 os.kill(pid, signal.SIGKILL)
         except (ProcessLookupError, PermissionError):
             pass
-    # Clean up stale PID file
     try:
         PID_FILE.unlink(missing_ok=True)
     except OSError:
@@ -462,10 +444,10 @@ async function refresh() {
   $("now").textContent = new Date().toLocaleTimeString();
   let data;
   try {
-    data = await (await fetch("/status", {cache: "no-store"})).json();
+    const resp = await fetch("/status", {cache: "no-store"});
+    if (resp.status === 401) { window.location.href = "/login"; return; }
+    data = await resp.json();
   } catch (e) {
-    // If 401, redirect to login
-    if (e.message && e.message.includes("401")) window.location.href = "/login";
     return;
   }
   const r = data.reading || {};
@@ -519,7 +501,6 @@ async function loadLogs() {
   } catch {}
 }
 
-// ▶ 手动触发阅读 — 只在空闲时启动，不杀进程
 $("start-btn").addEventListener("click", async () => {
   $("start-btn").disabled = true;
   try {
@@ -533,7 +514,6 @@ $("start-btn").addEventListener("click", async () => {
   } finally { setTimeout(refresh, 1000); }
 });
 
-// 🔄 重启阅读 — 杀掉当前进程并重新启动（用于刷新二维码）
 $("restart-btn").addEventListener("click", async () => {
   $("restart-btn").disabled = true;
   $("restart-btn").textContent = "重启中…";
