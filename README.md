@@ -1,4 +1,4 @@
-来自linux.do
+https://linux.do/logo-32.svg
 
 # weread-challenge-hf
 
