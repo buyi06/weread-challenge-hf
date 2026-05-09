@@ -2,7 +2,7 @@
 """Flask Web UI for weread-selenium-cli on HuggingFace Spaces.
 
 Features:
-  - Password-protected Web UI (default: 114114aa)
+  - Password-protected Web UI (default: linuxdo123)
   - Dark-themed status dashboard with auto-refresh
   - QR code display + manual restart button
   - Manual trigger reading / restart reading
@@ -43,7 +43,7 @@ READING_INTERVAL_HOURS = float(os.environ.get("READING_INTERVAL_HOURS", "12"))
 START_SCRIPT = Path(os.environ.get("START_SCRIPT", "/app/start_reading.sh"))
 COOKIE_TTL_DAYS = 30
 LOGIN_QR_FRESH_MINUTES = 5
-WEB_PASSWORD = os.environ.get("WEB_PASSWORD", "114114aa")
+WEB_PASSWORD = os.environ.get("WEB_PASSWORD", "linuxdo123")
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -289,25 +289,28 @@ def route_start() -> Response:
 
 @app.route("/restart", methods=["POST"])
 def route_restart() -> Response:
-    pid = _pid_alive()
-    _kill_reader(pid)
     try:
-        PID_FILE.unlink(missing_ok=True)
-    except OSError:
-        pass
-    # Delete cookies + old QR so the new run generates a fresh login QR
-    for f in [COOKIES_JSON, LOGIN_PNG]:
+        pid = _pid_alive()
+        _kill_reader(pid)
         try:
-            f.unlink(missing_ok=True)
+            PID_FILE.unlink(missing_ok=True)
         except OSError:
             pass
-    # Give the killed process time to fully exit
-    for _ in range(20):
-        time.sleep(0.1)
-        if _pid_alive() != pid:
-            break
-    new_pid = _spawn_reader("manual")
-    return jsonify({"ok": True, "killed_pid": pid, "spawned_pid": new_pid})
+        # Delete cookies + old QR so the new run generates a fresh login QR
+        for f in [COOKIES_JSON, LOGIN_PNG]:
+            try:
+                f.unlink(missing_ok=True)
+            except OSError:
+                pass
+        # Give the killed process time to fully exit
+        for _ in range(20):
+            time.sleep(0.1)
+            if _pid_alive() != pid:
+                break
+        new_pid = _spawn_reader("manual")
+        return jsonify({"ok": True, "killed_pid": pid, "spawned_pid": new_pid})
+    except Exception as e:
+        return jsonify({"ok": False, "reason": str(e)}), 500
 
 
 @app.route("/stop", methods=["POST"])
@@ -332,28 +335,10 @@ def route_stop() -> Response:
 
 
 def _kill_reader(pid: int | None) -> None:
-    """Terminate the reading process and its children."""
+    """Terminate the reading process. Also cleans up lock file."""
     if pid is None:
         return
-    # Kill direct children first, then the main process
     try:
-        # Find child PIDs via /proc
-        child_pids = []
-        try:
-            for entry in os.listdir(f"/proc/{pid}/task"):
-                try:
-                    with open(f"/proc/{pid}/task/{entry}/children", "r") as f:
-                        child_pids.extend(int(x) for x in f.read().split() if x.strip())
-                except (FileNotFoundError, ValueError):
-                    pass
-        except (FileNotFoundError, PermissionError):
-            pass
-        # Kill children then parent
-        for cpid in child_pids:
-            try:
-                os.kill(cpid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
         os.kill(pid, signal.SIGTERM)
     except (ProcessLookupError, PermissionError):
         pass
