@@ -1,6 +1,6 @@
-<img src="https://linux.do/logo-32.svg" width="32" align="left">
+<p align="center"><img src="https://linux.do/logo-32.svg" width="40"></p>
 
-# weread-challenge-hf
+<h1 align="center">weread-challenge-hf</h1>
 
 
 将 [weread-challenge-selenium](https://github.com/jqknono/weread-challenge-selenium) 改造为适配 HuggingFace Spaces 的单容器版本。
