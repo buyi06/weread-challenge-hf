@@ -150,6 +150,20 @@ def _qr_status() -> tuple[bool, float | None]:
     return (age <= LOGIN_QR_FRESH_MINUTES * 60, age)
 
 
+def _is_paused(pid: int | None) -> bool:
+    """Check if a process is in stopped (paused) state."""
+    if pid is None:
+        return False
+    try:
+        with open(f"/proc/{pid}/status", "r") as f:
+            for line in f:
+                if line.startswith("State:"):
+                    return "stopped" in line.lower()
+    except (FileNotFoundError, PermissionError):
+        return False
+    return False
+
+
 def _reading_state() -> dict:
     last = _last_run()
     pid = _pid_alive()
@@ -491,6 +505,22 @@ def route_notif_save() -> Response:
 
     return jsonify({"ok": True})
 
+
+
+
+@app.route("/pause", methods=["POST"])
+def route_pause() -> Response:
+    """Pause or resume the reading process (SIGSTOP/SIGCONT)."""
+    pid = _pid_alive()
+    if pid is None:
+        return jsonify({"ok": False, "reason": "not running"}), 409
+    paused = _is_paused(pid)
+    if paused:
+        os.kill(pid, signal.SIGCONT)
+        return jsonify({"ok": True, "action": "resumed", "pid": pid})
+    else:
+        os.kill(pid, signal.SIGSTOP)
+        return jsonify({"ok": True, "action": "paused", "pid": pid})
 
 @app.route("/healthz")
 def route_health() -> Response:
