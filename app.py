@@ -343,7 +343,7 @@ def _kill_reader(pid: int | None) -> None:
     except (ProcessLookupError, PermissionError):
         pass
     # Delete the flock lockfile so next spawn isn't blocked
-    LOCK_FILE = DATA_DIR / ".reading.lock"
+    LOCK_FILE = DATA_DIR / "run.lock"
     try:
         LOCK_FILE.unlink(missing_ok=True)
     except OSError:
